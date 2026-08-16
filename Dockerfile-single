@@ -1,0 +1,109 @@
+FROM ubuntu:24.04
+
+# Prevent interactive prompts during installation
+ENV DEBIAN_FRONTEND=noninteractive
+
+# 1. Install all build tools and runtime dependencies together
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    vim \
+    git \
+    ca-certificates \
+    build-essential \
+    pkg-config \
+    libfuse3-dev \
+    libcunit1-dev \
+    libssl-dev \
+    uuid-dev \
+    libaio-dev \
+    libncurses-dev \
+    patchelf \
+    sudo \
+    python3 \
+    python3-pip \
+    python3-jinja2 \
+    python3-tabulate \
+    python3-yaml \
+    python3-pyelftools \
+    python3-hatchling \
+    meson \
+    ninja-build \
+    nasm \
+    libnuma-dev \
+    autoconf \
+    automake \
+    libtool \
+    intel-cmt-cat \
+    libvirt-dev \
+    libnuma1 \
+    libfuse3-3 \
+    libssl3 \
+    openssl \
+    libuuid1 \
+    libaio1t64 \
+    libncurses6 \
+    libatomic1 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip3 install --break-system-packages uv
+
+# spdk's python/ package builds via hatchling (PEP 517). uv normally builds
+# source distributions in an isolated env and fetches the build backend from
+# PyPI even when it's already installed system-wide - that fetch is what
+# breaks `make install` in an airgapped environment. python3-hatchling above
+# provides the backend locally; this makes uv use it instead of reaching out.
+ENV UV_NO_BUILD_ISOLATION=1
+
+WORKDIR /workspace
+
+# 2. Embed the Dockerfile and Rebuild Instructions inside the container image
+COPY Dockerfile-single /workspace/Dockerfile-single
+COPY README.md /workspace/README.md
+
+# 3. Clone SPDK and preserve submodules for future local rebuilding
+RUN git clone --branch v26.05 --depth 1 https://github.com/spdk/spdk.git /workspace/spdk
+
+WORKDIR /workspace/spdk
+RUN git submodule update --init
+
+# Run package dependency installation script
+RUN ./scripts/pkgdep.sh --no-check-hugepages
+
+# 4. Initial baseline compilation
+#RUN ./configure --prefix=/workspace/spdk_package --disable-tests --disable-unit-tests && \
+#    make -j$(nproc) && \
+#    make install
+
+# Build and install isa-l into its own prefix so its umbrella header
+# (isa-l.h, which itself does #include <isa-l/crc.h>) resolves correctly -
+# the raw source checkout layout doesn't match what isa-l.h expects.
+WORKDIR /workspace/spdk/isa-l
+RUN ./autogen.sh && ./configure --prefix=/workspace/spdk/isa-l-install && make -j$(nproc) install
+
+ENV PKG_CONFIG_PATH="/workspace/spdk/isa-l-install/lib/pkgconfig:${PKG_CONFIG_PATH}" CFLAGS="-I/workspace/spdk/isa-l-install/include" LDFLAGS="-L/workspace/spdk/isa-l-install/lib"
+
+# 5. Build DPDK with a safe CPU instruction set to prevent container startup crashes
+WORKDIR /workspace/spdk/dpdk
+#RUN meson setup /workspace/dpdk_build -Dplatform=generic -Dcpu_instruction_set=corei7 && \
+#    ninja -C /workspace/dpdk_build && \
+#    ninja -C /workspace/dpdk_build install
+
+# Set up global runtime paths pointing to your workspace binaries
+ENV PATH="/workspace/spdk_package/bin:/workspace/spdk/scripts:/usr/local/bin:${PATH}"
+ENV LD_LIBRARY_PATH="/workspace/spdk_package/lib:${LD_LIBRARY_PATH}"
+# `spdk_package` is also where `make install` (step 4) drops libdpdk.pc, since
+# SPDK installs the DPDK it builds internally into its own --prefix. Without
+# this, `pkg-config --exists libdpdk` fails and any DPDK example's Makefile
+# (examples/*/Makefile) errors with "no installation of DPDK found".
+#
+# SPDK only builds the small subset of DPDK libraries it needs (vhost,
+# cryptodev, dmadev, ...), so its libdpdk.pc satisfies simple examples
+# (helloworld, ethtool, l2fwd, ...) but not ones needing libraries SPDK
+# doesn't build (rte_lpm, rte_acl, rte_sched, rte_eventdev, ...). If step 5
+# (the standalone DPDK meson/ninja build) is also run, it installs the full
+# DPDK library set to /usr/local, covering every example. Listing that path
+# first here means it's preferred over SPDK's partial one whenever it
+# exists, while still falling back to SPDK's if step 5 was skipped.
+ENV PKG_CONFIG_PATH="/usr/local/lib/x86_64-linux-gnu/pkgconfig:/workspace/spdk_package/lib/pkgconfig:${PKG_CONFIG_PATH}"
+
+WORKDIR /workspace
+CMD ["/bin/bash"]
