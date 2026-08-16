@@ -1,5 +1,8 @@
 FROM ubuntu:24.04
 
+LABEL org.opencontainers.image.source="https://github.com/gorrthegodbutcher/spdk-dpdk-ubuntu"
+LABEL org.opencontainers.image.licenses="MIT"
+
 # Prevent interactive prompts during installation
 ENV DEBIAN_FRONTEND=noninteractive
 
