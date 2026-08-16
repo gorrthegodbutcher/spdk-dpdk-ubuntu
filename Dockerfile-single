@@ -44,7 +44,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libatomic1 \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip3 install --break-system-packages uv
+RUN pip3 install --no-cache-dir --break-system-packages uv
 
 # spdk's python/ package builds via hatchling (PEP 517). uv normally builds
 # source distributions in an isolated env and fetches the build backend from
@@ -63,7 +63,7 @@ COPY README.md /workspace/README.md
 RUN git clone --branch v26.05 --depth 1 https://github.com/spdk/spdk.git /workspace/spdk
 
 WORKDIR /workspace/spdk
-RUN git submodule update --init
+RUN git submodule update --init --depth 1
 
 # Run package dependency installation script
 RUN ./scripts/pkgdep.sh --no-check-hugepages
