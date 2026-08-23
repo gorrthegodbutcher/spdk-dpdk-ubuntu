@@ -1,0 +1,75 @@
+From 2fd96cedb1d763b4883ec973f6a450d0b70f110a Mon Sep 17 00:00:00 2001
+From: Mike Murphy <mike@sugarmillgang.com>
+Date: Sun, 23 Aug 2026 18:42:39 +0000
+Subject: [PATCH 1/2] net/atlantic: fix Rx descriptor completion race
+
+atl_recv_pkts() read a write-back descriptor's dd/eop/pkt_len
+fields via a plain struct copy from DMA-coherent memory, with no
+barrier against the NIC's concurrent DMA write. This allowed a
+torn read: dd could pass its "done" check while the rest of the
+same descriptor still held stale or partially-written data.
+
+The multi-segment walk compounded this: once inside a scatter
+chain it advanced through ring descriptors checking only eop,
+never rechecking dd on each new descriptor. A torn or genuinely
+not-yet-posted continuation descriptor was then consumed as if
+valid, letting the loop run away through stale ring memory -
+observed consuming thousands of descriptors for what should have
+been a handful of packets, well past the ring's own wraparound
+point, while receiving jumbo (scatter) frames.
+
+Add a read barrier once dd is observed set, and recheck dd on
+each descriptor the scatter walk advances to, stopping cleanly
+instead of trusting an unfinished descriptor's contents.
+
+Fixes: 3d38e3dcf197 ("net/atlantic: implement Rx path")
+Cc: igor.russkikh@aquantia.com
+
+Signed-off-by: Mike Murphy <mike@sugarmillgang.com>
+---
+ drivers/net/atlantic/atl_rxtx.c | 22 ++++++++++++++++++++++
+ 1 file changed, 22 insertions(+)
+
+diff --git a/drivers/net/atlantic/atl_rxtx.c b/drivers/net/atlantic/atl_rxtx.c
+index 7b7bf5abbc..2d551a341f 100644
+--- a/drivers/net/atlantic/atl_rxtx.c
++++ b/drivers/net/atlantic/atl_rxtx.c
+@@ -941,6 +941,12 @@ atl_recv_pkts(void *rx_queue, struct rte_mbuf **rx_pkts, uint16_t nb_pkts)
+ 			break;
+ 		}
+ 
++		/*
++		 * Barrier before reading the rest of the write-back
++		 * descriptor, so it can't be torn against the NIC's DMA.
++		 */
++		rte_rmb();
++
+ 		PMD_RX_LOG(DEBUG, "port_id=%u queue_id=%u tail=%u "
+ 			   "eop=0x%x pkt_len=%u hash=0x%x hash_type=0x%x",
+ 			   (unsigned int)rxq->port_id,
+@@ -1068,6 +1074,22 @@ atl_recv_pkts(void *rx_queue, struct rte_mbuf **rx_pkts, uint16_t nb_pkts)
+ 				break;
+ 			rxd = (struct hw_atl_rxd_s *)&rxq->hw_ring[tail];
+ 			rxd_wb = *(struct hw_atl_rxd_wb_s *)rxd;
++
++			/*
++			 * dd was only checked on the eop descriptor found
++			 * by the search above, not on this one - stop rather
++			 * than trust an unfinished descriptor's stale data.
++			 */
++			if (!rxd_wb.dd) {
++				PMD_RX_LOG(DEBUG,
++				   "port_id=%u queue_id=%u tail=%u: "
++				   "continuation desc not dd yet",
++				   (unsigned int)rxq->port_id,
++				   (unsigned int)rxq->queue_id,
++				   (unsigned int)tail);
++				goto err_stop;
++			}
++			rte_rmb();
+ 		};
+ 
+ 		/*
+-- 
+2.34.1
+

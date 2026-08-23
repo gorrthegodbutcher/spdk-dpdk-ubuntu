@@ -1,0 +1,48 @@
+From 7d3a56fb3cd4ac461ac6cceaa895e8fe00545a49 Mon Sep 17 00:00:00 2001
+From: Mike Murphy <mike@sugarmillgang.com>
+Date: Sun, 23 Aug 2026 18:42:44 +0000
+Subject: [PATCH 2/2] net/atlantic: fix Tx cleanup descriptor read race
+
+atl_xmit_cleanup() scans hw_ring descriptors for a set dd bit to
+know how many are safe to reclaim, reading dd straight from
+DMA-coherent memory the NIC concurrently writes, with no barrier.
+
+A torn or stale read here can make the scan believe nothing is
+done when descriptors have genuinely completed, so to_clean comes
+back 0 and cleanup is skipped. Since atl_xmit_pkts() only refuses
+to send when tx_free is too low, and only cleanup ever grows
+tx_free back, a missed cleanup pass can leave tx_free permanently
+short: every later send call sees insufficient free descriptors
+and transmits nothing, indefinitely, with no way to recover.
+
+Add a read barrier once the scan's dd checks are complete and
+before acting on to_clean.
+
+Fixes: 2b1472d7150c ("net/atlantic: implement Tx path")
+Cc: pavel.belous@aquantia.com
+
+Signed-off-by: Mike Murphy <mike@sugarmillgang.com>
+---
+ drivers/net/atlantic/atl_rxtx.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/drivers/net/atlantic/atl_rxtx.c b/drivers/net/atlantic/atl_rxtx.c
+index 2d551a341f..34f53cd6cc 100644
+--- a/drivers/net/atlantic/atl_rxtx.c
++++ b/drivers/net/atlantic/atl_rxtx.c
+@@ -1162,6 +1162,12 @@ atl_xmit_cleanup(struct atl_tx_queue *txq)
+ 				break;
+ 		}
+ 
++		/*
++		 * Same dd/DMA race as the Rx path; barrier before
++		 * acting on what was just read.
++		 */
++		rte_rmb();
++
+ 		if (to_clean == 0)
+ 			return;
+ 
+-- 
+2.34.1
+
