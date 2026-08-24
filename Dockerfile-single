@@ -69,15 +69,23 @@ RUN git clone --branch v26.05 --depth 1 https://github.com/spdk/spdk.git /worksp
 WORKDIR /workspace/spdk
 RUN git submodule update --init --depth 1
 
-# Fix a jumbo-frame Rx/Tx instability in the vendored DPDK atlantic PMD:
-# unbarriered reads of NIC write-back descriptors could observe torn/stale
-# data, causing an Rx ring-consumption runaway and Tx descriptors going
-# permanently unreclaimed. Submitted upstream to dev@dpdk.org; applied
-# here directly since DPDK's own release cadence is out of our control.
+# Fix known instability in the vendored DPDK atlantic PMD:
+# - 0001/0002: unbarriered reads of NIC write-back descriptors could
+#   observe torn/stale data, causing an Rx ring-consumption runaway and
+#   Tx descriptors going permanently unreclaimed under jumbo frames.
+#   Submitted upstream to dev@dpdk.org.
+# - 0003: atl_dev_stop() never cancelled the 1s delayed MACsec-config
+#   alarm armed by every link status change, so a port stopped/closed
+#   within that window let the alarm fire against already-freed
+#   dev_private memory (use-after-free, observed as a SIGSEGV under
+#   rapid interface restart/cycling). Not yet submitted upstream.
+# Applied here directly since DPDK's own release cadence is out of our
+# control.
 WORKDIR /workspace/spdk/dpdk
 RUN git -c user.name="Mike Murphy" -c user.email="mike@sugarmillgang.com" \
     am /workspace/patches/0001-net-atlantic-fix-Rx-descriptor-completion-race.patch \
-       /workspace/patches/0002-net-atlantic-fix-Tx-cleanup-descriptor-read-race.patch
+       /workspace/patches/0002-net-atlantic-fix-Tx-cleanup-descriptor-read-race.patch \
+       /workspace/patches/0003-net-atlantic-fix-delayed-MACsec-alarm-use-after-free.patch
 WORKDIR /workspace/spdk
 
 # Run package dependency installation script
